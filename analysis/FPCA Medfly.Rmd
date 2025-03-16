@@ -1,0 +1,138 @@
+---
+title: "real_data_analysis"
+output: pdf_document
+date: "2025-03-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fdapace)
+library(fda)
+library(tidyverse)
+```
+
+```{r}
+rm(list = ls())
+```
+
+## Medfly
+
+```{r}
+data(medfly25)
+
+df = fdapace::MakeFPCAInputs(medfly25$ID, medfly25$Days, medfly25$nEggs)
+
+medfly25 %>%
+  filter(ID %in% sample(unique(ID), 10)) %>%
+  ggplot(aes(x = Days, y = nEggs, group = ID, color = factor(ID))) +
+  geom_line() +
+  theme_bw() +
+  theme(
+    legend.position = "none"
+  )
+
+res = fdapace::FPCA(
+  df$Ly,
+  df$Lt
+)
+
+plot(res)
+```
+
+
+## Bootstrap
+
+```{r}
+Y = medfly25 %>%
+  dplyr::select(ID, Days, nEggs) %>% # Select relevant columns
+  pivot_wider(names_from = Days, values_from = nEggs, values_fill = list(nEggs = 0)) %>%
+  dplyr::select(-1) %>%
+  as.matrix()
+
+m = 789
+R = 20
+t = 1:25
+
+boot_estimates = rep(NA, R)
+
+for(r in 1:R){
+    boot_indices = sample(1:m, m, replace = T)
+    boot_Y = Y[boot_indices,]
+    
+    boot_df = data.frame(
+      id = rep(1:m, each = n),
+      Y = c(t(boot_Y)),
+      X = 1
+    )
+    
+    boot_Yt = rbind(Y, t)
+    
+    boot_fpca = boot_Yt %>% FunOnFun::tibbleFormat(t) %>% FunOnFun::fpcaFormat(id_col = "id")
+    
+    boot_res = fdapace::FPCA(
+      boot_fpca$Variable1,
+      boot_fpca$Time,
+      list(dataType = "Sparse",
+           error = T,
+           kernel = "epan",
+           verbose = F,
+           nRegGrid = length(t))
+    )
+    
+    boot_trend = t(boot_res$phi[,1, drop = F] %*% t(boot_res$xiEst[, 1, drop = F]))
+    boot_detrend = boot_Y - boot_trend
+    
+    boot_df_detrend = data.frame(
+      id = rep(1:m, each = n),
+      Y = c(t(boot_detrend)),
+      X = 1
+    )
+    
+    boot_gee_detrend = geepack::geeglm(
+      Y ~ -1 + X,
+      data = boot_df_detrend,
+      id = id,
+      corstr = "exchangeable",
+      std.err = "san.se"
+    )
+    
+   boot_estimates[r] = boot_gee_detrend$coefficients %>% as.numeric
+  }
+```
+
+
+## Trend
+
+```{r}
+trend_df = data.frame(
+  days = 1:25,
+  nEggs = res$phi[,1]
+)
+
+trend_df %>%
+  ggplot(aes(x = days, y = nEggs)) +
+  geom_line(linewidth = 1, color = "#1b4f72") +
+  theme_bw() + 
+  labs(y = expression(f(t)),
+       x = "Days")
+```
+
+## Regression
+
+### Detrend
+
+```{r}
+trend = c(res$phi[,1, drop =F] %*% t(res$xiEst[, 1, drop = F]))
+medfly25$trend = trend
+
+medfly25$detrend = medfly25$nEggs - medfly25$trend
+
+gee = geepack::geeglm(
+  detrend ~ 1,
+  data = medfly25,
+  id = ID,
+  corstr = "exchangeable"
+)
+
+summary(gee)
+```
